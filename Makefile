@@ -77,3 +77,46 @@ tf-destroy:
 	cd terraform && terraform destroy
 
 .PHONY: tf-init tf-fmt tf-validate tf-plan tf-apply tf-apply-auto tf-apply-auto-target tf-destroy
+
+# -----------------------------
+# Kubernetes (app deploy)
+# -----------------------------
+K8S_DIR ?= k8s
+K8S_NAMESPACE ?= bulletin
+K8S_APP_LABEL ?= app=bulletin-app
+K8S_LOCAL_PORT ?= 8088
+
+k8s-apply:
+	kubectl apply -k $(K8S_DIR)
+
+k8s-secret-apply:
+	@test -n "$(SPRING_DATASOURCE_URL)" || (echo "SPRING_DATASOURCE_URL is required"; exit 1)
+	@test -n "$(SPRING_DATASOURCE_USERNAME)" || (echo "SPRING_DATASOURCE_USERNAME is required"; exit 1)
+	@test -n "$(SPRING_DATASOURCE_PASSWORD)" || (echo "SPRING_DATASOURCE_PASSWORD is required"; exit 1)
+	@test -n "$(STORAGE_S3_ACCESSKEY)" || (echo "STORAGE_S3_ACCESSKEY is required"; exit 1)
+	@test -n "$(STORAGE_S3_SECRETKEY)" || (echo "STORAGE_S3_SECRETKEY is required"; exit 1)
+	kubectl -n $(K8S_NAMESPACE) create secret generic bulletin-secret \
+		--from-literal=SPRING_DATASOURCE_URL="$(SPRING_DATASOURCE_URL)" \
+		--from-literal=SPRING_DATASOURCE_USERNAME="$(SPRING_DATASOURCE_USERNAME)" \
+		--from-literal=SPRING_DATASOURCE_PASSWORD="$(SPRING_DATASOURCE_PASSWORD)" \
+		--from-literal=STORAGE_S3_ACCESSKEY="$(STORAGE_S3_ACCESSKEY)" \
+		--from-literal=STORAGE_S3_SECRETKEY="$(STORAGE_S3_SECRETKEY)" \
+		--dry-run=client -o yaml | kubectl apply -f -
+
+k8s-delete:
+	kubectl delete -k $(K8S_DIR)
+
+k8s-status:
+	kubectl get ns $(K8S_NAMESPACE)
+	kubectl get deploy,po,svc -n $(K8S_NAMESPACE)
+
+k8s-rollout:
+	kubectl rollout status deploy/bulletin-app -n $(K8S_NAMESPACE)
+
+k8s-logs:
+	kubectl logs -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) --tail=200
+
+k8s-port-forward:
+	kubectl port-forward -n $(K8S_NAMESPACE) svc/bulletin-app $(K8S_LOCAL_PORT):80
+
+.PHONY: k8s-apply k8s-secret-apply k8s-delete k8s-status k8s-rollout k8s-logs k8s-port-forward

@@ -167,6 +167,86 @@ Outputs можно посмотреть так:
 cd terraform && terraform output
 ```
 
+## Kubernetes manifests and first deploy
+
+Базовые манифесты лежат в [`k8s/`](./k8s):
+
+- `namespace.yaml` — отдельный namespace `bulletin`
+- `configmap.yaml` — не секретные переменные приложения
+- `secret.yaml` — шаблон Secret (без реальных значений)
+- `secret.example.env` — пример env-файла для безопасного создания Secret
+- `deployment.yaml` — Deployment с RollingUpdate, ресурсами и probes
+- `service.yaml` — Service `ClusterIP` для внутреннего трафика
+- `kustomization.yaml` — чтобы применять namespace/configmap/deployment/service одним `kubectl apply -k`
+
+### Перед первым apply
+
+1. Проверь контекст кластера:
+
+```bash
+kubectl config current-context
+```
+
+2. Создай локальный env-файл с секретами (в git не попадёт):
+
+```bash
+cp k8s/secret.example.env .env.local-k8s
+```
+
+Заполни `.env.local-k8s` реальными значениями DB/S3.
+
+3. Загрузи переменные и создай/обнови Secret в кластере:
+
+```bash
+set -a
+source .env.local-k8s
+set +a
+make k8s-secret-apply
+```
+
+### Деплой в кластер
+
+```bash
+make k8s-apply
+make k8s-rollout
+make k8s-status
+```
+
+Проверка подов:
+
+```bash
+kubectl get pods -n bulletin
+kubectl get svc -n bulletin
+```
+
+### Проверка сервиса через port-forward
+
+```bash
+make k8s-port-forward
+```
+
+Пока команда активна, в новом терминале:
+
+```bash
+curl -i http://127.0.0.1:8088/api/bulletins
+curl -i http://127.0.0.1:8088/swagger-ui/index.html
+```
+
+Логи:
+
+```bash
+make k8s-logs
+```
+
+### Быстрые команды
+
+- `make k8s-apply` — применить все манифесты
+- `make k8s-secret-apply` — создать/обновить Secret из env-переменных
+- `make k8s-status` — показать namespace/deploy/pod/service
+- `make k8s-rollout` — дождаться готовности deployment
+- `make k8s-port-forward` — локальный доступ к service
+- `make k8s-delete` — удалить все ресурсы из `k8s/`
+
 ## Running
 
 ### Backend (local dev profile)

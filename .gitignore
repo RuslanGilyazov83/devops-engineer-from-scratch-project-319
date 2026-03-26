@@ -44,3 +44,6 @@ terraform/*.tfstate
 terraform/*.tfstate.*
 terraform/crash.log
 terraform/crash.*.log
+
+# Local secrets for k8s deploy
+.env.local-k8s
