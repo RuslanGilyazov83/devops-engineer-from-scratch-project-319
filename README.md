@@ -51,6 +51,122 @@ All other variables supported by Spring Boot can be overridden the same way; che
 - Make.
 - NodeJS 20+
 
+## Terraform infrastructure (Yandex Cloud)
+
+Инфраструктура описана в директории [`terraform/`](./terraform) и включает:
+
+- VPC (subnet + NAT + security groups)
+- Managed Kubernetes (cluster + node group)
+- Managed PostgreSQL
+- Object Storage bucket для приложения
+- Lockbox secret (DB/S3)
+- Remote state Terraform в Object Storage (S3 backend)
+
+### Требования к машине, с которой запускаем Terraform
+
+- Yandex Cloud CLI `yc` (установка и quickstart: `https://yandex.cloud/ru/docs/cli/quickstart#install`)
+- Terraform \(>= 1.6\)
+- Доступ в интернет (Terraform будет скачивать провайдеры)
+- Доступы в Yandex Cloud: `cloud_id`, `folder_id`, IAM token
+
+### Быстрый старт: креды для Terraform
+
+1. Авторизуйся в YC CLI и выбери cloud/folder:
+
+```bash
+yc init
+```
+
+2. Экспортируй переменные окружения (пример):
+
+```bash
+export YC_TOKEN="$(yc iam create-token)"
+export YC_CLOUD_ID="your-cloud-id"
+export YC_FOLDER_ID="your-folder-id"
+export YC_ZONE="ru-central1-a"
+```
+
+### Bootstrap: bucket для Terraform state (делается один раз)
+
+Terraform backend использует S3 bucket **до** `terraform apply`, поэтому bucket для state нужно создать заранее.
+Проще всего — отдельным сервисным аккаунтом и статическим ключом.
+
+Примерный сценарий (выполни в терминале, подставив свои значения):
+
+1) Создай сервисный аккаунт (например `tf-state-sa`) и дай ему роль `editor` на folder.  
+2) Создай static access key для этого аккаунта.  
+3) Создай bucket для state (например `ruslangilyazov-tf-state`).  
+4) Сохрани `access_key/secret_key` **в менеджере паролей**, не в репозитории.
+
+Дальше для работы с Terraform в этом репозитории понадобятся переменные:
+
+- `TF_STATE_BUCKET` — bucket для state
+- `TF_STATE_KEY` — путь до state файла внутри bucket
+- `TF_STATE_ACCESS_KEY` / `TF_STATE_SECRET_KEY` — ключи для backend
+
+### Команды Terraform (через Makefile)
+
+Перед выполнением команд экспортируй backend-переменные:
+
+```bash
+export TF_STATE_BUCKET="your-tf-state-bucket"
+export TF_STATE_KEY="terraform/project-devops-deploy/terraform.tfstate"
+export TF_STATE_ACCESS_KEY="***"
+export TF_STATE_SECRET_KEY="***"
+```
+
+Дальше:
+
+```bash
+make tf-init
+make tf-plan
+make tf-apply
+```
+
+Если в WSL при `make tf-apply` ввод **`yes`** не срабатывает и пишет **Apply cancelled**, запусти без интерактива: **`make tf-apply-auto`** (это `terraform apply -auto-approve`). Либо зайди в каталог `terraform/` и выполни там `terraform apply` вручную.
+
+Если при `terraform init` появляется ошибка **`Invalid provider registry host`** для `registry.terraform.io` — это значит, что прямой доступ к реестру HashiCorp из твоей сети недоступен. В репозитории уже подключено **зеркало** [`terraform-mirror.yandexcloud.net`](https://terraform-mirror.yandexcloud.net/) через файл `terraform/terraform_mirror.tfrc` и переменную `TF_CLI_CONFIG_FILE` в `Makefile`. Запускай команды через `make tf-*` из корня репозитория (не забудь `export` для `TF_STATE_*` перед `make tf-init`).
+
+### Если apply упал на середине (403 на state, Lockbox, VPC, bucket)
+
+1. **403 при сохранении state в S3 (`PutObject` / `Access Denied`)** — у сервисного аккаунта, чьи ключи стоят в `TF_STATE_*`, должна быть роль на каталог, например **`storage.admin`** (или минимум права на запись в этот bucket):
+
+   ```bash
+   yc resource-manager folder add-access-binding "$(yc config get folder-id)" \
+     --role storage.admin \
+     --subject serviceAccount:ajeijer50vi6ed2klosi
+   ```
+
+   (подставь свой `folder-id` и **ID** своего `tf-state-sa` из `yc iam service-account list`).
+
+2. **`Permission denied` на Lockbox** — пользователю, от имени которого идёт `YC_TOKEN`, нужна роль **`lockbox.editor`** (или `editor` на каталог, если в вашей организации так принято) на тот же `folder`.
+
+3. **`Operation is not permitted in the folder` для VPC** — проверь в консоли YC роли пользователя на каталог: нужны права на создание сетей (**`vpc.admin`** или **`editor`** на `folder`). Если ролей мало — добавь через IAM.
+
+4. **Bucket 400 / folder_id** — для `yandex_storage_bucket` в конфиге задано `folder_id` (см. `terraform/storage.tf`): при создании бакета от имени пользователя без привязки к каталогу это обязательно.
+
+5. **Файл `errored.tfstate`** после ошибки — после исправления прав на state попробуй загрузить состояние в бекенд:
+
+   ```bash
+   cd terraform
+   terraform state push errored.tfstate
+   ```
+
+   Если Terraform предупредит о расхождении — напиши в поддержку курса или сделай `terraform plan` и при необходимости импорт уже созданных ресурсов (`terraform import ...`).
+
+Форматирование/валидация:
+
+```bash
+make tf-fmt
+make tf-validate
+```
+
+Outputs можно посмотреть так:
+
+```bash
+cd terraform && terraform output
+```
+
 ## Running
 
 ### Backend (local dev profile)
