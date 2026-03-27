@@ -1,3 +1,236 @@
+# Project DevOps Deploy
+
+Исходное приложение: [hexlet-components/project-devops-deploy](https://github.com/Hexlet-components/project-devops-deploy).
+
+## Состав проекта
+
+- `Dockerfile`, `.dockerignore` — контейнеризация приложения
+- `terraform/` — инфраструктура в Yandex Cloud
+- `k8s/` — Kubernetes-манифесты приложения
+- `Makefile` — команды для Terraform и Kubernetes
+
+## Требования
+
+- Docker
+- kubectl
+- Terraform >= 1.6
+- Yandex Cloud CLI (`yc`)
+- Helm
+- JDK 21 (для локальной сборки приложения)
+- Node.js 20+ (для локальной фронтенд-разработки)
+
+## Задание 1. Контейнеризация и публикация образа
+
+### Сборка и локальный запуск
+
+```bash
+docker build -t bulletin-board:local .
+docker run --rm -p 8080:8080 -p 9090:9090 bulletin-board:local
+```
+
+Проверка:
+
+- `http://localhost:8080/`
+- `http://localhost:9090/actuator/health`
+
+### Публикация в Docker Hub
+
+```bash
+docker login
+docker tag bulletin-board:local ruslangilyazov/project-devops-deploy:0.0.1
+docker push ruslangilyazov/project-devops-deploy:0.0.1
+```
+
+Для обновления версии:
+
+```bash
+docker tag bulletin-board:local ruslangilyazov/project-devops-deploy:0.0.2
+docker push ruslangilyazov/project-devops-deploy:0.0.2
+```
+
+## Задание 2. Terraform-инфраструктура (Yandex Cloud)
+
+### Переменные окружения
+
+```bash
+export YC_TOKEN="$(yc iam create-token)"
+export YC_CLOUD_ID="your-cloud-id"
+export YC_FOLDER_ID="your-folder-id"
+export YC_ZONE="ru-central1-a"
+
+export TF_STATE_BUCKET="your-tf-state-bucket"
+export TF_STATE_KEY="terraform/project-devops-deploy/terraform.tfstate"
+export TF_STATE_ACCESS_KEY="***"
+export TF_STATE_SECRET_KEY="***"
+```
+
+### Команды Terraform
+
+```bash
+make tf-init
+make tf-fmt
+make tf-validate
+make tf-plan
+make tf-apply-auto
+```
+
+Проверка:
+
+```bash
+cd terraform && terraform output
+```
+
+### Что создаётся
+
+- VPC (сеть, подсеть, NAT, security groups)
+- Managed Kubernetes (cluster + node group)
+- Managed PostgreSQL
+- Object Storage bucket
+- Lockbox secret
+- Remote state backend в Object Storage
+
+## Задание 3. Kubernetes-манифесты и первичный деплой
+
+Манифесты лежат в `k8s/`:
+
+- `namespace.yaml`
+- `configmap.yaml`
+- `secret.yaml` (шаблон)
+- `deployment.yaml`
+- `service.yaml`
+- `kustomization.yaml`
+
+### Применение
+
+```bash
+make k8s-apply
+make k8s-rollout
+make k8s-status
+```
+
+### Секреты (локально, без хранения в git)
+
+```bash
+cp k8s/secret.example.env .env.local-k8s
+set -a
+source .env.local-k8s
+set +a
+make k8s-secret-apply
+```
+
+## Задание 4. Масштабирование, балансировка, zero-downtime
+
+### Масштабирование нод
+
+- В Terraform задано `node_count = 2` (минимум 2 worker-ноды).
+
+Проверка:
+
+```bash
+kubectl get nodes -o wide
+```
+
+### Балансировка и устойчивость
+
+- `Service` типа `LoadBalancer`
+- `PodDisruptionBudget` (`k8s/pdb.yaml`)
+- `HorizontalPodAutoscaler` (`k8s/hpa.yaml`)
+- `Deployment` c `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`)
+
+Проверка:
+
+```bash
+make k8s-external-ip
+make k8s-pdb
+make k8s-hpa
+kubectl get endpoints -n bulletin bulletin-app -o wide
+```
+
+### Rolling update
+
+```bash
+make k8s-set-image IMAGE=ruslangilyazov/project-devops-deploy:0.0.2
+make k8s-rollout
+kubectl get pods -n bulletin -l app=bulletin-app -o wide
+```
+
+Проверка без `5xx`:
+
+```bash
+EXT_IP=158.160.244.96
+for i in $(seq 1 30); do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "http://$EXT_IP/api/bulletins?page=1&perPage=1")
+  echo "$i -> $code"
+done
+```
+
+## Задание 5. Мониторинг и логирование в Yandex Cloud
+
+### Что настроено в проекте
+
+- В `k8s/deployment.yaml` добавлены аннотации Prometheus scrape:
+  - `prometheus.io/scrape: "true"`
+  - `prometheus.io/port: "9090"`
+  - `prometheus.io/path: "/actuator/prometheus"`
+- В `Makefile` добавлены проверки:
+  - `make k8s-restarts`
+  - `make k8s-prom-sample`
+  - `make k8s-logs-5xx`
+
+### Managed Prometheus
+
+В workspace добавлены:
+
+- Recording rules (`rules-step5.yml`)
+- Alerting rules (`alerts-step5.yml`)
+
+Запросы для дашборда:
+
+```promql
+sum(rate(http_server_requests_seconds_count{application="bulletins"}[5m]))
+```
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{application="bulletins"}[5m])))
+```
+
+```promql
+sum(rate(http_server_requests_seconds_count{application="bulletins",status=~"5.."}[5m]))
+```
+
+```promql
+sum(rate(container_cpu_usage_seconds_total{namespace="bulletin",container!="",image!=""}[5m]))
+```
+
+```promql
+sum(container_memory_working_set_bytes{namespace="bulletin",container!="",image!=""})
+```
+
+```promql
+sum(kube_pod_container_status_restarts_total{namespace="bulletin"})
+```
+
+### Cloud Logging
+
+Требуется:
+
+- log group для k8s-логов
+- retention policy
+- фильтры по `namespace=bulletin` и `app=bulletin-app`
+
+## Скриншоты для проверки
+
+Сохранять в проект:
+
+- `docs/monitoring/step5-dashboard.png`
+- `docs/monitoring/step5-alerts.png`
+- `docs/monitoring/step5-logging.png`
+
+## Полезные ссылки
+
+- [Yandex Monitoring](https://cloud.yandex.ru/docs/monitoring)
+- [Managed Service for Prometheus](https://yandex.cloud/ru/services/managed-prometheus)
+- [Cloud Logging](https://yandex.cloud/ru/docs/logging/)
 ### Hexlet tests and linter status:
 
 [![Actions Status](https://github.com/RuslanGilyazov83/devops-engineer-from-scratch-project-319/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/RuslanGilyazov83/devops-engineer-from-scratch-project-319/actions)
@@ -260,6 +493,100 @@ kubectl get hpa -n bulletin
 kubectl rollout status deploy/bulletin-app -n bulletin
 kubectl logs -n bulletin -l app=bulletin-app --since=10m | grep 'instance":"bulletin-app-'
 ```
+
+## Monitoring and logging (Step 5)
+
+Цель шага: собрать метрики кластера и приложения, централизовать логи в Yandex Cloud и настроить базовые алерты.
+
+Что подготовлено в репозитории:
+
+- В `k8s/deployment.yaml` добавлены аннотации для Prometheus-скрейпа:
+  - `prometheus.io/scrape: "true"`
+  - `prometheus.io/port: "9090"`
+  - `prometheus.io/path: "/actuator/prometheus"`
+- В `Makefile` добавлены быстрые проверки:
+  - `make k8s-restarts` — рестарты pod-ов
+  - `make k8s-prom-sample` — следы health/metrics в логах
+  - `make k8s-logs-5xx` — поиск 5xx в логах приложения
+
+### 1) Метрики (Yandex Monitoring / Managed Service for Prometheus)
+
+1. Применить манифесты (чтобы аннотации скрейпа попали в pod template):
+
+```bash
+make k8s-apply
+make k8s-rollout
+```
+
+2. Убедиться, что endpoints и pod-ы приложения готовы:
+
+```bash
+kubectl get pods -n bulletin -l app=bulletin-app -o wide
+kubectl get endpoints -n bulletin bulletin-app -o wide
+```
+
+3. В Yandex Cloud открыть Monitoring / Managed Prometheus и проверить метрики:
+   - CPU / Memory pod-ов
+   - количество pod-ов
+   - HTTP latency (например `http_server_requests` из Spring Boot actuator)
+
+### 2) Логи (Cloud Logging)
+
+1. В Cloud Logging создать/использовать log group для k8s-логов и настроить retention.
+2. Подключить поток логов из Managed Kubernetes в этот log group.
+3. Проверить фильтры:
+   - по namespace `bulletin`
+   - по приложению `bulletin-app`
+   - по ошибкам `5xx` / `ERROR`
+
+Локальные проверки перед Cloud Logging:
+
+```bash
+make k8s-logs
+make k8s-logs-5xx
+make k8s-restarts
+```
+
+### 3) Дашборды и алерты (базовый набор)
+
+Рекомендуемый минимум:
+
+- Availability:
+  - readiness/liveness status
+  - доля `5xx` ответов
+- Performance:
+  - latency p95/p99
+  - RPS
+- Stability:
+  - restarts по pod
+  - CPU/memory saturation
+
+Алерты (база):
+
+- `5xx rate > threshold` (например > 1-2% 5 минут)
+- `p95 latency` выше SLA
+- `restartCount` растёт
+- pod не `Ready` дольше N минут
+
+### 4) Скриншоты для сдачи
+
+Сложи скриншоты в папку проекта:
+
+- `docs/monitoring/step5-dashboard.png`
+- `docs/monitoring/step5-alerts.png`
+- `docs/monitoring/step5-logging.png`
+
+Что обязательно показать:
+
+1. Дашборд с CPU/memory + latency/RPS.
+2. Логи приложения в Cloud Logging (фильтр `namespace=bulletin`).
+3. Алерт в состоянии firing/ok (или карточка созданного алерта).
+
+Полезные ссылки:
+
+- [Yandex Monitoring](https://cloud.yandex.ru/docs/monitoring)
+- [Managed Service for Prometheus](https://yandex.cloud/ru/services/managed-prometheus)
+- [Cloud Logging](https://yandex.cloud/ru/docs/logging/)
 
 ### Перед первым apply
 

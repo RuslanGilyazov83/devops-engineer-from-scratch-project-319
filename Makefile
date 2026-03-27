@@ -132,4 +132,15 @@ k8s-set-image:
 	@test -n "$(IMAGE)" || (echo "IMAGE is required"; exit 1)
 	kubectl -n $(K8S_NAMESPACE) set image deploy/bulletin-app app=$(IMAGE)
 
-.PHONY: k8s-apply k8s-secret-apply k8s-delete k8s-status k8s-rollout k8s-logs k8s-port-forward k8s-external-ip k8s-hpa k8s-pdb k8s-set-image
+# Быстрые проверки для шага мониторинга (метрики/рестарты/5xx в логах).
+k8s-restarts:
+	kubectl get pods -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) \
+		-o custom-columns=NAME:.metadata.name,RESTARTS:.status.containerStatuses[0].restartCount
+
+k8s-prom-sample:
+	kubectl logs -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) --tail=200 | grep -E 'actuator/health|http.server.requests' || true
+
+k8s-logs-5xx:
+	kubectl logs -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) --since=30m | grep -E '"status":5[0-9]{2}| 5[0-9]{2} ' || true
+
+.PHONY: k8s-apply k8s-secret-apply k8s-delete k8s-status k8s-rollout k8s-logs k8s-port-forward k8s-external-ip k8s-hpa k8s-pdb k8s-set-image k8s-restarts k8s-prom-sample k8s-logs-5xx

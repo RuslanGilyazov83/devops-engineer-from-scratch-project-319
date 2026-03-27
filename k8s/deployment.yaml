@@ -20,6 +20,11 @@ spec:
     metadata:
       labels:
         app: bulletin-app
+      annotations:
+        # Для Managed Prometheus / Prometheus-compatible scraper.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/actuator/prometheus"
     spec:
       topologySpreadConstraints:
         - maxSkew: 1
