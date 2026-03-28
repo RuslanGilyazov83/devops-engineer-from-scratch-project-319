@@ -79,15 +79,70 @@ tf-destroy:
 .PHONY: tf-init tf-fmt tf-validate tf-plan tf-apply tf-apply-auto tf-apply-auto-target tf-destroy
 
 # -----------------------------
-# Kubernetes (app deploy)
+# Kubernetes / Helm (app deploy)
 # -----------------------------
 K8S_DIR ?= k8s
 K8S_NAMESPACE ?= bulletin
 K8S_APP_LABEL ?= app=bulletin-app
 K8S_LOCAL_PORT ?= 8088
 
-k8s-apply:
-	kubectl apply -k $(K8S_DIR)
+HELM_CHART ?= k8s/bulletin-board
+HELM_RELEASE ?= bulletin-board
+# Пример переопределения: HELM_VALUES="-f k8s/bulletin-board/values.yaml -f k8s/bulletin-board/values-dev.yaml"
+HELM_VALUES ?= -f $(HELM_CHART)/values.yaml
+# Первый выкат: pull образа на двух нодах + старт JVM иногда дольше 10m.
+HELM_TIMEOUT ?= 25m
+
+k8s-apply: helm-upgrade
+
+helm-lint:
+	helm lint $(HELM_CHART)
+
+helm-template:
+	helm template $(HELM_RELEASE) $(HELM_CHART) -n $(K8S_NAMESPACE) $(HELM_VALUES)
+
+helm-upgrade:
+	helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
+		-n $(K8S_NAMESPACE) --create-namespace \
+		--wait --timeout $(HELM_TIMEOUT) \
+		$(HELM_VALUES)
+
+# То же без --wait: если снова deadline, смотри `make k8s-diagnose`, потом `kubectl rollout status ...`.
+helm-upgrade-nowait:
+	helm upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
+		-n $(K8S_NAMESPACE) --create-namespace \
+		$(HELM_VALUES)
+
+k8s-diagnose:
+	kubectl get pods,svc,hpa,pdb -n $(K8S_NAMESPACE) -o wide
+	kubectl describe pod -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) | tail -n 80
+	kubectl logs -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) --tail=60 --all-containers=true 2>&1 | tail -n 60
+
+# Снять ресурсы, созданные раньше через kubectl (без меток Helm) — иначе helm upgrade ругается на ownership.
+k8s-remove-legacy-app:
+	kubectl delete pdb bulletin-app -n $(K8S_NAMESPACE) --ignore-not-found
+	kubectl delete hpa bulletin-app -n $(K8S_NAMESPACE) --ignore-not-found
+	kubectl delete deploy bulletin-app -n $(K8S_NAMESPACE) --ignore-not-found
+	kubectl delete svc bulletin-app -n $(K8S_NAMESPACE) --ignore-not-found
+	kubectl delete cm bulletin-config -n $(K8S_NAMESPACE) --ignore-not-found
+	kubectl delete secret bulletin-secret -n $(K8S_NAMESPACE) --ignore-not-found
+
+helm-uninstall:
+	helm uninstall $(HELM_RELEASE) -n $(K8S_NAMESPACE)
+
+# Пример: make helm-rollback REVISION=1
+helm-rollback:
+	@test -n "$(REVISION)" || (echo "REVISION is required (helm history $(HELM_RELEASE) -n $(K8S_NAMESPACE))"; exit 1)
+	helm rollback $(HELM_RELEASE) $(REVISION) -n $(K8S_NAMESPACE)
+
+helm-history:
+	helm history $(HELM_RELEASE) -n $(K8S_NAMESPACE)
+
+# Репозитории чартов (ingress-nginx, external-secrets) — по необходимости.
+helm-repo-add:
+	helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+	helm repo add external-secrets https://charts.external-secrets.io
+	helm repo update
 
 k8s-secret-apply:
 	@test -n "$(SPRING_DATASOURCE_URL)" || (echo "SPRING_DATASOURCE_URL is required"; exit 1)
@@ -102,8 +157,7 @@ k8s-secret-apply:
 		--from-literal=STORAGE_S3_SECRETKEY="$(STORAGE_S3_SECRETKEY)" \
 		--dry-run=client -o yaml | kubectl apply -f -
 
-k8s-delete:
-	kubectl delete -k $(K8S_DIR)
+k8s-delete: helm-uninstall
 
 k8s-status:
 	kubectl get ns $(K8S_NAMESPACE)
@@ -144,3 +198,4 @@ k8s-logs-5xx:
 	kubectl logs -n $(K8S_NAMESPACE) -l $(K8S_APP_LABEL) --since=30m | grep -E '"status":5[0-9]{2}| 5[0-9]{2} ' || true
 
 .PHONY: k8s-apply k8s-secret-apply k8s-delete k8s-status k8s-rollout k8s-logs k8s-port-forward k8s-external-ip k8s-hpa k8s-pdb k8s-set-image k8s-restarts k8s-prom-sample k8s-logs-5xx
+.PHONY: helm-lint helm-template helm-upgrade helm-upgrade-nowait helm-uninstall helm-rollback helm-history helm-repo-add k8s-remove-legacy-app k8s-diagnose

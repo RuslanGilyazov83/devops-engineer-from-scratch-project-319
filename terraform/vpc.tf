@@ -35,6 +35,16 @@ resource "yandex_vpc_security_group" "k8s" {
   network_id = yandex_vpc_network.main.id
   labels     = local.labels
 
+  # Без этого NLB помечает цели UNHEALTHY (пробы не с 0.0.0.0/0).
+  # https://yandex.cloud/en/docs/managed-kubernetes/operations/connect/security-groups
+  ingress {
+    description       = "Network Load Balancer health checks"
+    protocol          = "TCP"
+    from_port         = 0
+    to_port           = 65535
+    predefined_target = "loadbalancer_healthchecks"
+  }
+
   # Чтобы kubectl (external endpoint) работал, нужно открыть TCP/443 на security group master API.
   ingress {
     protocol       = "TCP"
@@ -49,6 +59,14 @@ resource "yandex_vpc_security_group" "k8s" {
     description    = "SSH"
     v4_cidr_blocks = ["0.0.0.0/0"]
     port           = 22
+  }
+
+  # HTTP с интернета на LoadBalancer (443 уже открыт правилом Kubernetes API выше).
+  ingress {
+    protocol       = "TCP"
+    description    = "HTTP public (LoadBalancer)"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 80
   }
 
   # K8s NodePort range (по умолчанию).

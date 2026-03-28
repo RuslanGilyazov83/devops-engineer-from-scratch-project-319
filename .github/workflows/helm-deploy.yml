@@ -1,0 +1,43 @@
+# Опционально: helm upgrade --install из GitHub Actions.
+# Секрет репозитория KUBE_CONFIG — содержимое kubeconfig в base64
+# (например: base64 -w0 ~/.kube/config).
+name: Helm deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      values_files:
+        description: "Доп. файлы values через пробел"
+        required: false
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
+      - name: Helm upgrade --install
+        env:
+          KUBE_CONFIG_B64: ${{ secrets.KUBE_CONFIG }}
+          VALUES_EXTRA: ${{ github.event.inputs.values_files }}
+        run: |
+          if [ -z "${KUBE_CONFIG_B64:-}" ]; then
+            echo "::notice title=Helm deploy::Секрет KUBE_CONFIG не задан — выкат пропущен."
+            exit 0
+          fi
+          mkdir -p ~/.kube
+          echo "$KUBE_CONFIG_B64" | base64 -d > ~/.kube/config
+          EXTRA=""
+          for f in $VALUES_EXTRA; do
+            [ -n "$f" ] && EXTRA="$EXTRA -f $f"
+          done
+          helm upgrade --install bulletin-board ./k8s/bulletin-board \
+            -n bulletin --create-namespace --wait --timeout 25m \
+            -f k8s/bulletin-board/values.yaml \
+            $EXTRA

@@ -1,0 +1,9 @@
+1. Проверка статуса:
+   kubectl get pods,svc -n {{ .Release.Namespace }} -l app={{ .Values.names.deployment }}
+
+2. Внешний IP (LoadBalancer):
+   kubectl get svc {{ .Values.names.service }} -n {{ .Release.Namespace }}
+
+{{- if .Values.ingress.enabled }}
+3. Ingress host: {{ .Values.ingress.host | quote }}
+{{- end }}

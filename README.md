@@ -6,8 +6,9 @@
 
 - `Dockerfile`, `.dockerignore` — контейнеризация приложения
 - `terraform/` — инфраструктура в Yandex Cloud
-- `k8s/` — Kubernetes-манифесты приложения
-- `Makefile` — команды для Terraform и Kubernetes
+- `k8s/bulletin-board/` — Helm-чарт приложения (`Chart.yaml`, `values*.yaml`, `templates/`)
+- `k8s/secret.example.env` — пример переменных для Secret вне Helm
+- `Makefile` — команды для Terraform, Helm и kubectl
 
 ## Требования
 
@@ -19,7 +20,7 @@
 - JDK 21 (для локальной сборки приложения)
 - Node.js 20+ (для локальной фронтенд-разработки)
 
-## Задание 1. Контейнеризация и публикация образа
+## Docker: сборка и публикация образа
 
 ### Сборка и локальный запуск
 
@@ -48,7 +49,7 @@ docker tag bulletin-board:local ruslangilyazov/project-devops-deploy:0.0.2
 docker push ruslangilyazov/project-devops-deploy:0.0.2
 ```
 
-## Задание 2. Terraform-инфраструктура (Yandex Cloud)
+## Terraform (Yandex Cloud)
 
 ### Переменные окружения
 
@@ -89,18 +90,9 @@ cd terraform && terraform output
 - Lockbox secret
 - Remote state backend в Object Storage
 
-## Задание 3. Kubernetes-манифесты и первичный деплой
+## Kubernetes: деплой приложения
 
-Манифесты лежат в `k8s/`:
-
-- `namespace.yaml`
-- `configmap.yaml`
-- `secret.yaml` (шаблон)
-- `deployment.yaml`
-- `service.yaml`
-- `kustomization.yaml`
-
-### Применение
+Манифесты собраны в Helm-чарт `k8s/bulletin-board/`. Базовый выкат:
 
 ```bash
 make k8s-apply
@@ -118,11 +110,11 @@ set +a
 make k8s-secret-apply
 ```
 
-## Задание 4. Масштабирование, балансировка, zero-downtime
+## Масштабирование, балансировка, обновления
 
 ### Масштабирование нод
 
-- В Terraform задано `node_count = 2` (минимум 2 worker-ноды).
+- В Terraform по умолчанию `node_count = 2` (минимум две worker-ноды).
 
 Проверка:
 
@@ -133,8 +125,8 @@ kubectl get nodes -o wide
 ### Балансировка и устойчивость
 
 - `Service` типа `LoadBalancer`
-- `PodDisruptionBudget` (`k8s/pdb.yaml`)
-- `HorizontalPodAutoscaler` (`k8s/hpa.yaml`)
+- `PodDisruptionBudget` (`k8s/bulletin-board/templates/pdb.yaml`)
+- `HorizontalPodAutoscaler` (`k8s/bulletin-board/templates/hpa.yaml`)
 - `Deployment` c `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`)
 
 Проверка:
@@ -154,21 +146,21 @@ make k8s-rollout
 kubectl get pods -n bulletin -l app=bulletin-app -o wide
 ```
 
-Проверка без `5xx`:
+Проверка без `5xx` (подставь внешний IP сервиса):
 
 ```bash
-EXT_IP=158.160.244.96
+EXT_IP=<EXTERNAL_IP>
 for i in $(seq 1 30); do
   code=$(curl -s -o /dev/null -w "%{http_code}" "http://$EXT_IP/api/bulletins?page=1&perPage=1")
   echo "$i -> $code"
 done
 ```
 
-## Задание 5. Мониторинг и логирование в Yandex Cloud
+## Мониторинг и логирование (Yandex Cloud)
 
-### Что настроено в проекте
+### Что в репозитории
 
-- В `k8s/deployment.yaml` добавлены аннотации Prometheus scrape:
+- В `k8s/bulletin-board/templates/deployment.yaml` добавлены аннотации Prometheus scrape:
   - `prometheus.io/scrape: "true"`
   - `prometheus.io/port: "9090"`
   - `prometheus.io/path: "/actuator/prometheus"`
@@ -212,19 +204,65 @@ sum(kube_pod_container_status_restarts_total{namespace="bulletin"})
 
 ### Cloud Logging
 
-Требуется:
+В облаке настраиваются отдельно: log group для логов кластера, retention, фильтры по `namespace=bulletin` и `app=bulletin-app`.
 
-- log group для k8s-логов
-- retention policy
-- фильтры по `namespace=bulletin` и `app=bulletin-app`
+## Helm
 
-## Скриншоты для проверки
+Ссылки: [Helm](https://helm.sh/docs/), [best practices](https://helm.sh/docs/chart_best_practices/), опционально [Helmfile](https://helmfile.readthedocs.io/).
 
-Сохранять в проект:
+### Репозитории чартов (по необходимости)
 
-- `docs/monitoring/step5-dashboard.png`
-- `docs/monitoring/step5-alerts.png`
-- `docs/monitoring/step5-logging.png`
+```bash
+make helm-repo-add
+```
+
+Подключает `ingress-nginx` и `external-secrets` (сами чарты в этом проекте не ставятся — только при необходимости Ingress / External Secrets).
+
+### Структура чарта
+
+- `k8s/bulletin-board/Chart.yaml`
+- `k8s/bulletin-board/values.yaml` — базовые значения
+- `k8s/bulletin-board/values-dev.yaml`, `values-prod.yaml` — примеры окружений
+- `k8s/bulletin-board/templates/` — Deployment, Service, ConfigMap, Secret, PDB, HPA, Ingress (опционально)
+
+### Переопределение values (порядок слабее → сильнее)
+
+1. `values.yaml` в чарте
+2. Дополнительные файлы: `-f values-dev.yaml` (через `HELM_VALUES` в `Makefile`)
+3. `--set` / `--set-string` в командной строке
+4. Переменные окружения для CI не подставляются автоматически — передавай секреты через GitHub Secrets и `helm upgrade` с `--set` или временный файл (не коммитить)
+
+Пример:
+
+```bash
+export HELM_VALUES="-f k8s/bulletin-board/values.yaml -f k8s/bulletin-board/values-dev.yaml"
+make helm-upgrade
+```
+
+Проверка манифестов без кластера:
+
+```bash
+make helm-template
+make helm-lint
+```
+
+Если `make k8s-apply` падает с `context deadline exceeded`, поды не успели стать Ready: `make k8s-diagnose`, при необходимости увеличь ожидание (`HELM_TIMEOUT=40m make k8s-apply`) или выкати без `--wait`: `make helm-upgrade-nowait`, затем `kubectl rollout status deploy/bulletin-app -n bulletin`.
+
+### Релиз и откат
+
+```bash
+make helm-upgrade
+helm history bulletin-board -n bulletin
+make helm-rollback REVISION=1
+```
+
+`helm rollback` возвращает ресурсы к состоянию выбранной ревизии релиза (образы, replicas и т.д. — как в истории Helm).
+
+### CI/CD (опционально)
+
+Workflow [`.github/workflows/helm-deploy.yml`](./.github/workflows/helm-deploy.yml): ручной запуск (`workflow_dispatch`). Секрет `KUBE_CONFIG` — kubeconfig в **base64**. Если секрета нет, job завершается без ошибки.
+
+Если приложение раньше ставилось через `kubectl apply` без Helm, перед первым `helm upgrade --install` сними старые объекты (иначе будет ошибка ownership): `make k8s-remove-legacy-app`, затем снова `make k8s-apply`. Либо удали namespace и создай заново.
 
 ## Полезные ссылки
 
@@ -402,27 +440,19 @@ cd terraform && terraform output
 
 ## Kubernetes manifests and first deploy
 
-Базовые манифесты лежат в [`k8s/`](./k8s):
-
-- `namespace.yaml` — отдельный namespace `bulletin`
-- `configmap.yaml` — не секретные переменные приложения
-- `secret.yaml` — шаблон Secret (без реальных значений)
-- `secret.example.env` — пример env-файла для безопасного создания Secret
-- `deployment.yaml` — Deployment с RollingUpdate, ресурсами и probes
-- `service.yaml` — Service `LoadBalancer` для внешнего и внутреннего доступа
-- `kustomization.yaml` — чтобы применять namespace/configmap/deployment/service одним `kubectl apply -k`
+Helm-чарт: [`k8s/bulletin-board/`](./k8s/bulletin-board) (`templates/`, `values.yaml`). Пример env для Secret вне чарта: `k8s/secret.example.env`.
 
 ## Scaling, load balancing and zero-downtime releases
 
-Для шага 4 в репозитории уже добавлены:
+В репозитории уже добавлено:
 
 - масштаб нод в Terraform (`terraform/variables.tf`: `node_count = 2`)
 - `Service` типа `LoadBalancer` для внешнего доступа
-- `PodDisruptionBudget` (`k8s/pdb.yaml`)
-- `HorizontalPodAutoscaler` (`k8s/hpa.yaml`, min=2, max=4)
+- `PodDisruptionBudget` (`k8s/bulletin-board/templates/pdb.yaml`)
+- `HorizontalPodAutoscaler` (`k8s/bulletin-board/templates/hpa.yaml`, min=2, max=4)
 - `Deployment` с `replicas: 2` и `RollingUpdate` (`maxUnavailable: 0`) для релизов без простоя
 
-Если приложение неожиданно уходит в `CrashLoopBackOff`, это почти всегда означает, что `bulletin-secret` содержит `SPRING_DATASOURCE_*` (prod PostgreSQL) и переопределяет `ConfigMap`. В этом шаге ниже есть команды, которые пересоздадут `bulletin-secret` под H2 (без внешней БД) и вернут rollout в норму.
+Если приложение уходит в `CrashLoopBackOff`, часто причина в том, что `bulletin-secret` задаёт `SPRING_DATASOURCE_*` под PostgreSQL и переопределяет `ConfigMap`. Ниже — команды, чтобы пересоздать `bulletin-secret` под H2 (без внешней БД) и стабилизировать rollout.
 
 ### 1) Масштабировать кластер до 2+ нод
 
@@ -470,20 +500,20 @@ for i in $(seq 1 20); do curl -s -o /dev/null -w "%{http_code}\n" http://EXTERNA
 
 Ожидаемо: коды `200`/`304` без `5xx` в серии запросов.
 
-### Step 4 result (what is done)
+### Итог по масштабированию и HA
 
 - Worker node group is scaled to 2+ nodes via Terraform (`terraform/variables.tf`, `node_count`).
-- External access is configured through `Service` type `LoadBalancer` (`k8s/service.yaml`).
+- External access is configured through `Service` type `LoadBalancer` (chart template `service.yaml`).
 - Zero-downtime baseline is configured:
   - `Deployment` with `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`)
-  - `PodDisruptionBudget` (`k8s/pdb.yaml`, `maxUnavailable: 1`)
-  - `HorizontalPodAutoscaler` (`k8s/hpa.yaml`, min 2 / max 4)
+  - `PodDisruptionBudget` (`k8s/bulletin-board/templates/pdb.yaml`, `maxUnavailable: 1`)
+  - `HorizontalPodAutoscaler` (`k8s/bulletin-board/templates/hpa.yaml`, min 2 / max 4)
 - Rolling update is validated with `kubectl rollout status`.
 - Service checks are validated:
   - burst requests to `/api/bulletins` without `5xx`
   - logs confirm traffic/health checks are served by both pods (`instance` differs).
 
-### Step 4 quick proof commands
+### Быстрые проверки
 
 ```bash
 kubectl get nodes -o wide
@@ -494,13 +524,13 @@ kubectl rollout status deploy/bulletin-app -n bulletin
 kubectl logs -n bulletin -l app=bulletin-app --since=10m | grep 'instance":"bulletin-app-'
 ```
 
-## Monitoring and logging (Step 5)
+## Monitoring and logging
 
-Цель шага: собрать метрики кластера и приложения, централизовать логи в Yandex Cloud и настроить базовые алерты.
+Задача: метрики кластера и приложения, централизованные логи в Yandex Cloud и базовые алерты.
 
 Что подготовлено в репозитории:
 
-- В `k8s/deployment.yaml` добавлены аннотации для Prometheus-скрейпа:
+- В `k8s/bulletin-board/templates/deployment.yaml` добавлены аннотации для Prometheus-скрейпа:
   - `prometheus.io/scrape: "true"`
   - `prometheus.io/port: "9090"`
   - `prometheus.io/path: "/actuator/prometheus"`
@@ -568,26 +598,6 @@ make k8s-restarts
 - `restartCount` растёт
 - pod не `Ready` дольше N минут
 
-### 4) Скриншоты для сдачи
-
-Сложи скриншоты в папку проекта:
-
-- `docs/monitoring/step5-dashboard.png`
-- `docs/monitoring/step5-alerts.png`
-- `docs/monitoring/step5-logging.png`
-
-Что обязательно показать:
-
-1. Дашборд с CPU/memory + latency/RPS.
-2. Логи приложения в Cloud Logging (фильтр `namespace=bulletin`).
-3. Алерт в состоянии firing/ok (или карточка созданного алерта).
-
-Полезные ссылки:
-
-- [Yandex Monitoring](https://cloud.yandex.ru/docs/monitoring)
-- [Managed Service for Prometheus](https://yandex.cloud/ru/services/managed-prometheus)
-- [Cloud Logging](https://yandex.cloud/ru/docs/logging/)
-
 ### Перед первым apply
 
 1. Проверь контекст кластера:
@@ -654,7 +664,7 @@ make k8s-logs
 - `make k8s-status` — показать namespace/deploy/pod/service
 - `make k8s-rollout` — дождаться готовности deployment
 - `make k8s-port-forward` — локальный доступ к service
-- `make k8s-delete` — удалить все ресурсы из `k8s/`
+- `make k8s-delete` / `make helm-uninstall` — удалить Helm-релиз в namespace
 
 ## Running
 
